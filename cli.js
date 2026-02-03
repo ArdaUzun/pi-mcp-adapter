@@ -26,7 +26,6 @@ const FILES = [
   "tsconfig.json",
   "README.md",
   "CHANGELOG.md",
-  "ARCHITECTURE.md",
   "LICENSE",
 ];
 

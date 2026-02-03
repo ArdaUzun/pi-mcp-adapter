@@ -220,8 +220,6 @@ Tool names are fuzzy-matched on hyphens and underscores — `context7_resolve_li
 
 ## How It Works
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full picture. Short version:
-
 - One `mcp` tool in context (~200 tokens) instead of hundreds
 - Servers are lazy by default — they connect on first tool call, not at startup
 - Tool metadata is cached to disk so search/list/describe work without live connections
