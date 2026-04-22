@@ -3,12 +3,32 @@ import type { McpExtensionState } from "./state.js";
 import { Type } from "@sinclair/typebox";
 import { showStatus, showTools, reconnectServers, authenticateServer, openMcpPanel, openMcpSetup } from "./commands.js";
 import { loadMcpConfig } from "./config.js";
-import { buildProxyDescription, createDirectToolExecutor, getMissingConfiguredDirectToolServers, resolveDirectTools } from "./direct-tools.js";
+import {
+  buildProxyDescription,
+  createDirectToolExecutor,
+  getMissingConfiguredDirectToolServers,
+  resolveDirectTools,
+} from "./direct-tools.js";
 import { flushMetadataCache, initializeMcp, updateStatusBar } from "./init.js";
 import { loadMetadataCache } from "./metadata-cache.js";
-import { executeCall, executeConnect, executeDescribe, executeList, executeSearch, executeStatus, executeUiMessages } from "./proxy-modes.js";
+import {
+  executeCall,
+  executeConnect,
+  executeDescribe,
+  executeList,
+  executeSearch,
+  executeStatus,
+  executeUiMessages,
+} from "./proxy-modes.js";
 import { getConfigPathFromArgv, truncateAtWord } from "./utils.js";
 import { initializeOAuth, shutdownOAuth } from "./mcp-auth-flow.js";
+
+/** Strip $schema so pi core's Ajv doesn't fail on unrecognized drafts like 2020-12. */
+function sanitizeSchema(schema: unknown): Record<string, unknown> | undefined {
+  if (!schema || typeof schema !== "object") return undefined;
+  const { $schema, ...rest } = schema as Record<string, unknown>;
+  return rest;
+}
 
 export default function mcpAdapter(pi: ExtensionAPI) {
   let state: McpExtensionState | null = null;
@@ -51,19 +71,23 @@ export default function mcpAdapter(pi: ExtensionAPI) {
   const prefix = earlyConfig.settings?.toolPrefix ?? "server";
 
   const envRaw = process.env.MCP_DIRECT_TOOLS;
-  const directSpecs = envRaw === "__none__"
-    ? []
-    : resolveDirectTools(
-        earlyConfig,
-        earlyCache,
-        prefix,
-        envRaw?.split(",").map(s => s.trim()).filter(Boolean),
-      );
+  const directSpecs =
+    envRaw === "__none__"
+      ? []
+      : resolveDirectTools(
+          earlyConfig,
+          earlyCache,
+          prefix,
+          envRaw
+            ?.split(",")
+            .map((s) => s.trim())
+            .filter(Boolean),
+        );
   const missingConfiguredDirectToolServers = getMissingConfiguredDirectToolServers(earlyConfig, earlyCache);
   const shouldRegisterProxyTool =
-    earlyConfig.settings?.disableProxyTool !== true
-    || directSpecs.length === 0
-    || missingConfiguredDirectToolServers.length > 0;
+    earlyConfig.settings?.disableProxyTool !== true ||
+    directSpecs.length === 0 ||
+    missingConfiguredDirectToolServers.length > 0;
 
   for (const spec of directSpecs) {
     pi.registerTool({
@@ -71,8 +95,14 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       label: `MCP: ${spec.originalName}`,
       description: spec.description || "(no description)",
       promptSnippet: truncateAtWord(spec.description, 100) || `MCP tool from ${spec.serverName}`,
-      parameters: Type.Unsafe<Record<string, unknown>>(spec.inputSchema || { type: "object", properties: {} }),
-      execute: createDirectToolExecutor(() => state, () => initPromise, spec),
+      parameters: Type.Unsafe<Record<string, unknown>>(
+        sanitizeSchema(spec.inputSchema) || { type: "object", properties: {} },
+      ),
+      execute: createDirectToolExecutor(
+        () => state,
+        () => initPromise,
+        spec,
+      ),
     });
   }
 
@@ -90,10 +120,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
     initPromise = null;
 
     try {
-      await Promise.all([
-        shutdownState(previousState, "session_restart"),
-        shutdownOAuth(),
-      ]);
+      await Promise.all([shutdownState(previousState, "session_restart"), shutdownOAuth()]);
     } catch (error) {
       console.error("MCP: failed to shut down previous session state", error);
     }
@@ -102,36 +129,38 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       return;
     }
 
-    await initializeOAuth().catch(err => {
+    await initializeOAuth().catch((err) => {
       console.error("MCP OAuth initialization failed:", err);
     });
 
     const promise = initializeMcp(pi, ctx);
     initPromise = promise;
 
-    promise.then(async (nextState) => {
-      if (generation !== lifecycleGeneration || initPromise !== promise) {
-        try {
-          await shutdownState(nextState, "stale_session_start");
-        } catch (error) {
-          console.error("MCP: failed to clean stale session state", error);
+    promise
+      .then(async (nextState) => {
+        if (generation !== lifecycleGeneration || initPromise !== promise) {
+          try {
+            await shutdownState(nextState, "stale_session_start");
+          } catch (error) {
+            console.error("MCP: failed to clean stale session state", error);
+          }
+          return;
         }
-        return;
-      }
 
-      state = nextState;
-      updateStatusBar(nextState);
-      initPromise = null;
-    }).catch(err => {
-      if (generation !== lifecycleGeneration) {
-        return;
-      }
-      if (initPromise !== promise && initPromise !== null) {
-        return;
-      }
-      console.error("MCP initialization failed:", err);
-      initPromise = null;
-    });
+        state = nextState;
+        updateStatusBar(nextState);
+        initPromise = null;
+      })
+      .catch((err) => {
+        if (generation !== lifecycleGeneration) {
+          return;
+        }
+        if (initPromise !== promise && initPromise !== null) {
+          return;
+        }
+        console.error("MCP initialization failed:", err);
+        initPromise = null;
+      });
   });
 
   pi.on("session_shutdown", async () => {
@@ -141,10 +170,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
     initPromise = null;
 
     try {
-      await Promise.all([
-        shutdownState(currentState, "session_shutdown"),
-        shutdownOAuth(),
-      ]);
+      await Promise.all([shutdownState(currentState, "session_shutdown"), shutdownOAuth()]);
     } catch (error) {
       console.error("MCP: session shutdown cleanup failed", error);
     }
@@ -238,26 +264,40 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       promptSnippet: "MCP gateway - connect to MCP servers and call their tools",
       parameters: Type.Object({
         tool: Type.Optional(Type.String({ description: "Tool name to call (e.g., 'xcodebuild_list_sims')" })),
-        args: Type.Optional(Type.String({ description: "Arguments as JSON string (e.g., '{\"key\": \"value\"}')" })),
-        connect: Type.Optional(Type.String({ description: "Server name to connect (lazy connect + metadata refresh)" })),
+        args: Type.Optional(Type.String({ description: 'Arguments as JSON string (e.g., \'{"key": "value"}\')' })),
+        connect: Type.Optional(
+          Type.String({ description: "Server name to connect (lazy connect + metadata refresh)" }),
+        ),
         describe: Type.Optional(Type.String({ description: "Tool name to describe (shows parameters)" })),
         search: Type.Optional(Type.String({ description: "Search tools by name/description" })),
         regex: Type.Optional(Type.Boolean({ description: "Treat search as regex (default: substring match)" })),
-        includeSchemas: Type.Optional(Type.Boolean({ description: "Include parameter schemas in search results (default: true)" })),
-        server: Type.Optional(Type.String({ description: "Filter to specific server (also disambiguates tool calls)" })),
-        action: Type.Optional(Type.String({ description: "Action: 'ui-messages' to retrieve prompts/intents from UI sessions" })),
+        includeSchemas: Type.Optional(
+          Type.Boolean({ description: "Include parameter schemas in search results (default: true)" }),
+        ),
+        server: Type.Optional(
+          Type.String({ description: "Filter to specific server (also disambiguates tool calls)" }),
+        ),
+        action: Type.Optional(
+          Type.String({ description: "Action: 'ui-messages' to retrieve prompts/intents from UI sessions" }),
+        ),
       }),
-      async execute(_toolCallId, params: {
-        tool?: string;
-        args?: string;
-        connect?: string;
-        describe?: string;
-        search?: string;
-        regex?: boolean;
-        includeSchemas?: boolean;
-        server?: string;
-        action?: string;
-      }, _signal, _onUpdate, _ctx) {
+      async execute(
+        _toolCallId,
+        params: {
+          tool?: string;
+          args?: string;
+          connect?: string;
+          describe?: string;
+          search?: string;
+          regex?: boolean;
+          includeSchemas?: boolean;
+          server?: string;
+          action?: string;
+        },
+        _signal,
+        _onUpdate,
+        _ctx,
+      ) {
         let parsedArgs: Record<string, unknown> | undefined;
         if (params.args) {
           try {
